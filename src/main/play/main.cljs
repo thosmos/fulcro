@@ -29,21 +29,29 @@
   ([f] (useEffect f))
   ([f deps] (useEffect f (clj->js deps))))
 
-(defn use-fulcro [component query ident-fn initial-ident]
-  (let [[props setProps] (use-state {})]
-    (use-effect
+(defn use-fulcro
+  "React Hook to simulate hooking fulcro state database up to a hook-based react component."
+  [component query ident-fn initial-ident]
+  (let [[props setProps] (use-state {})] ; this is how the component gets props, and how Fulcro would update them
+    (use-effect ; the empty array makes this a didMount effect
       (fn []
-        (set! (.-fulcro_query component) query)
+        (set! (.-fulcro_query component) query) ;; record the query and ident function on the component function itself
         (set! (.-fulcro_ident component) ident-fn)
+        ;; pull initial props from the database, and set them on the props
         (let [initial-props (prim/db->tree query (get-in @app-db initial-ident) @app-db)]
           (setProps initial-props))
+        ;; Add the setProps function to the index so we can call it later (set of functions stored by ident)
         (index! initial-ident setProps)
+        ;; cleanup function: drops the update fn from the index
         (fn []
           (drop! initial-ident setProps)))
       #js [])
     props))
 
+;; This is kind of what defsc would generate...nested props take a little more work
 (defonce Counter
+  ;; here the idea is that we're able to define a root without an incoming join edge. This lets any component act as
+  ;; a data root, even though it isn't the app root
   (fn [config-props]
     (let [{:counter/keys [id n] :as props} (use-fulcro
                                              Counter        ; component
@@ -56,7 +64,7 @@
                                 (let [;; MUTATE
                                       ident         [:counter/id (aget config-props "mount-id")]
                                       _             (swap! app-db update-in (conj ident :counter/n) inc)
-                                      ;; REFRESH
+                                      ;; REFRESH is trivial..denormalize and set props via index stored set props functions
                                       query         (get-query Counter)
                                       props         (prim/db->tree query (get-in @app-db ident) @app-db)
                                       set-props-fns (get @index ident)]
