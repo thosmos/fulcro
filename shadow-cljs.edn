@@ -12,6 +12,12 @@
                                       :http-root "resources/public"
                                       :http-port 9001}}
 
+            :play       {:target     :browser
+                         :output-dir "resources/public/js/play"
+                         :asset-path "/js/play"
+                         :modules    {:main {:entries [play.main]}}
+                         :devtools   {:preloads [fulcro.inspect.preload]}}
+
             :test       {:target           :browser-test
                          :test-dir         "resources/public/js/test"
                          :ns-regexp        "-spec$"
@@ -26,11 +32,11 @@
                          :output-to        "target/ci.js"
                          :ns-regexp        "-spec$"}
 
-            :workspaces {:target           nubank.workspaces.shadow-cljs.target
-                         :ns-regexp        "-ws$"
-                         :output-dir       "resources/public/js/workspaces"
-                         :asset-path       "js/workspaces"
-                         :devtools         {:http-port          9003
-                                            :http-resource-root "public"
-                                            :http-root          "resources/public"}}}}
+            :workspaces {:target     nubank.workspaces.shadow-cljs.target
+                         :ns-regexp  "-ws$"
+                         :output-dir "resources/public/js/workspaces"
+                         :asset-path "js/workspaces"
+                         :devtools   {:http-port          9003
+                                      :http-resource-root "public"
+                                      :http-root          "resources/public"}}}}
 

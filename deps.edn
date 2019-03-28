@@ -1,6 +1,7 @@
 {:paths   ["src/main"],
 
  :deps    {bidi                       {:mvn/version "2.1.5"},
+           com.taoensso/tufte         {:mvn/version "2.0.1"}
            bk/ring-gzip               {:mvn/version "0.3.0"},
            cljsjs/react               {:mvn/version "16.8.1-0"},
            cljsjs/react-dom           {:mvn/version "16.8.1-0"},
@@ -37,7 +38,7 @@
                                      com.taoensso/sente {:mvn/version "1.14.0-RC2"}}}
 
            :workspaces {:extra-paths ["src/workspaces"]
-                        :extra-deps {nubank/workspaces {:mvn/version "1.0.3"}}}
+                        :extra-deps  {nubank/workspaces {:mvn/version "1.0.3"}}}
 
            :book       {:extra-paths ["src/book"]
                         :extra-deps  {devcards       {:mvn/version "0.2.5"}
