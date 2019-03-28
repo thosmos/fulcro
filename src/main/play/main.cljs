@@ -32,10 +32,10 @@
 (defn use-fulcro
   "React Hook to simulate hooking fulcro state database up to a hook-based react component."
   [component query ident-fn initial-ident]
-  (let [[props setProps] (use-state {})] ; this is how the component gets props, and how Fulcro would update them
-    (use-effect ; the empty array makes this a didMount effect
+  (let [[props setProps] (use-state {})]                    ; this is how the component gets props, and how Fulcro would update them
+    (use-effect                                             ; the empty array makes this a didMount effect
       (fn []
-        (set! (.-fulcro_query component) query) ;; record the query and ident function on the component function itself
+        (set! (.-fulcro_query component) query)             ;; record the query and ident function on the component function itself
         (set! (.-fulcro_ident component) ident-fn)
         ;; pull initial props from the database, and set them on the props
         (let [initial-props (prim/db->tree query (get-in @app-db initial-ident) @app-db)]
@@ -47,6 +47,10 @@
           (drop! initial-ident setProps)))
       #js [])
     props))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SAMPLE 1: How a component could act as it's own data root (rendered as a child, but not tied to the parent's query)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; This is kind of what defsc would generate...nested props take a little more work
 (defonce Counter
@@ -89,3 +93,85 @@
       (ui-counter #js {:mount-id 1})))
 
   index)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SAMPLE 2: How a normal Fulcro component (joined to the parent) would work (props need a time marker to prevent
+;; accidental time reversal on parent local-state updates)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn use-fulcro-nonroot
+  "React Hook to simulate hooking fulcro state database up to a hook-based react component."
+  [ident]
+  (let [[props setProps] (use-state (with-meta {} {:time 0}))]
+    (use-effect
+      (fn []
+        (js/console.log "Indexing ident " ident)
+        (index! ident setProps)
+        (fn []
+          (js/console.log "Dropping index for ident " ident)
+          (drop! ident setProps)))
+      ;; refresh list. ident needs to be a string because react compares with ===
+      #js [(str ident) setProps])
+    props))
+
+(let [query    [:item/id :item/label]
+      ident-fn (fn [p] [:item/id (:item/id p)])]
+  (defonce TodoItem
+    (fn [props]
+      (let [props-from-parent (.-fp props)
+            parent-time       (-> props-from-parent meta :time)
+            ident             (get-ident TodoItem props-from-parent)
+            _                 (js/console.log :props props-from-parent :ident ident)
+            local-props       (use-fulcro-nonroot ident)
+            local-time        (-> local-props meta :time)
+            {:item/keys [label] :as real-props} (if (and local-time (pos-int? local-time)
+                                                      (> local-time parent-time))
+                                                  local-props
+                                                  props-from-parent)]
+        (dom/li label))))
+  (set! (.-fulcro_query TodoItem) query)
+  (set! (.-fulcro_ident TodoItem) ident-fn))
+
+(defn ui-todo-item [props]
+  (dom/create-element TodoItem #js {:fp props}))
+
+(defn t [data tm] (with-meta data {:time tm}))
+
+(comment
+
+  ;; Props-based render
+  ;; Setting time manually.  The UI targeted refresh (set-props-for-2) adds time to props, as does render from props
+  ;; render logic prevents rendering going "back in time"
+  (let [props-refresh-time 1]
+    (render!
+      (dom/ol
+        (ui-todo-item (t {:item/id 1 :item/label "A"} props-refresh-time))
+        (ui-todo-item (t {:item/id 2 :item/label "B"} props-refresh-time))
+        (ui-todo-item (t {:item/id 3 :item/label "C"} props-refresh-time)))))
+
+  ;; Local (targeted props) UI refresh
+  ;; This will update the prior rendering the first time you use it (since time = 2, and props time was 1),
+  ;; but then the props-based rendering won't refresh unless you bump time to 3+
+  (let [local-refresh-time 2
+        set-props-for-2    (first (get @index [:item/id 2]))]
+    (set-props-for-2 (t {:item/id 2 :item/label "XXX"} local-refresh-time)))
+
+  )
+
+#_#_(defonce TodoList
+      (fn [props]
+        (let [props-from-parent (.-fp props)
+              parent-time       (-> props-from-parent meta :time)
+              [local-props setProps] (use-fulcro-nonroot TodoList [:list/id :list/name]
+                                       (fn [p] [:list/id (:list/id p)])
+                                       {})
+              local-time        (-> local-props meta :time)]
+          ;; this would need to be a time-based check as well in case the parent was updating for setState reasons,
+          ;; and could really just choose most recent without needing to do an actual setProps
+          (when (not= props-from-parent local-props)
+            (setProps props-from-parent))
+
+          )))
+
+    (defn ui-todo-list [props]
+      (dom/create-element TodoList #js {:fp props}))
