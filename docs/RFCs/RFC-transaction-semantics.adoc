@@ -1,0 +1,253 @@
+== RFC - For Fulcro 3 Transaction Semantics and API
+
+=== Background – Fulcro 2 Transactions
+
+The transaction system of Fulcro 2, inherited from Om Next, is very simple and is lacking a number of features desirable to
+production apps.  The current basic system treats transactions as a data sequence of call-like markers that are
+interpreted by a parser via a multi-pass process:
+
+```
+(transact! this `[(a) (b) (c {:x 1})])
+```
+
+The only guaranteed behavior that Fulcro gives for such transactions is that they will have their optimistic
+operations all run in sequence, and that the network side of any of them will also be submitted to the server in a
+way that allows the server to maintain their relative order (but only if they use the same remote).
+
+Fulcro 2 and Incubator have tried to improve on this with pessimistic transactions that solve the following additional
+problems:
+
+* One unit of code can handle the optimistic, network submission, ok response, and error response.
+* A hack is used that allows a response handler of such a mutation to submit another transaction, which can in turn
+interact with the network.
+* A way to declare mutations to eliminate the need for transaction quoting. Unfortunately since it is not the standard
+and doesn't mix well (you can use the unquoted ones in quoted form, but not vice versa) it has not gained much traction.
+
+This does, in fact, solve most common needs. However, experience has shown that there are additional cases that
+are simply not handled well by the current implementation.
+
+=== Remaining Problems
+
+To date the solutions supplied all rely on one of two mechanisms for "transactional dependency":
+
+* js `setTimeout` with a small (or zero) timeout to "queue" a transaction.  Typically used to deal with the fact that
+calling transact from within transact led to nesting that could "break things".
+* Relying on the network queue and "post mutations".  This mechanism relies on the fact that remotes in Fulcro have
+a queue to enforce sequential processing.
+
+The problem with the first solution is that a sequence of operations might queue more than one thing with `setTimeout`,
+and might desire some sort of enforce sequencing.  Resorting to arbitrary time offsets (1st waits 10ms, second 20ms)
+really isn't very expressive. Also, the user has to be aware that transactions need this sort of thing. The fact that
+two calls to transact don't "behave well automatically" is simply a design oversight.
+
+The problems with the use of the network queue are:
+
+* A given mutation can only "queue itself" with respect to a single remote. There is no (clear) way to indicate "run
+this after all currently queued network traffic completes".
+* There is no general way to submit a transaction whose optimistic behaviors wait for network traffic to complete.
+* There is only a very limited way to indicate how "optimistic" a transaction is (`ptransact` delays the optimistic side
+of mutations that *follow* remote operating mutations *within the same call to `transact!`*, but that's it).
+* There is no way to indicate a set of mutations can run "in parallel". E.g. there is no way for two calls to
+`transact!` to end up on the network at the same time, other than through auto-merging as a sequence.  There is
+no way to indicate a single `[(a) (b) (c)]` should be run as three network requests to take advantage of server parallelism
+for reduced latency.
+* There is no way to indicate the priority of a mutation.  For example assume that a given user action might cause more than
+one call to `transact!`. There are scenarios where you might want to indicate something "goes last" (or first) independent of what other
+things get submitted into the queue afterwards.
+* The network queue is opaque and uses core async. Examining it for tooling or additional manipulation (e.g. re-prioritizing entries in it)
+is difficult.
+
+== Proposal
+
+The proposed solution for the above issues is two-fold:
+
+. Adopt the pessimistic mutation support from Incubator.  It is trivial to ensure that a mutation can
+process the return from the server.
+. Expose a formal and non-opaque priority queue to the transaction processing system. The nodes in the queue will
+represent the units of operation as submitted to `transact!` as maps that hold additional information about the
+semantics of the processing of those nodes.
+
+The nodes will be kept in "processing order", so that new submissions that happen to the priority queue can be
+appropriately inserted in the correct location. The nodes will also contain the status of things like whether or
+not the optimistic side of the operation has been executed.
+
+The `transact!` API will be expanded to include an options map that can specify the details of how to run the transaction
+supplied:
+
+```
+(transact! this tx options)
+```
+
+The optional `ref` argument of the old `transact!` will be moved into this options map in the Fulcro 2 version, and the
+options map will be made optional.  The default behavior will match that of Fulcro 2 to minimize the need for source
+changes when porting (fulcro 3 will use new namespaces for new API, so porting can be done over time).
+
+The actual run-time algorithms are to be determined by the features below. The overall operation requires that the "first
+call" to `transact!` in a sequence of execution (while the application holds the js thread) will mark that the
+transaction queue needs to be "further processed".  Something like a request-animation-frame or setTimeout can be used
+to ensure that the queue will be looked at upon release.
+Subsequent transacts within that sequence will simply notice the flag is already set, and go about their business of
+adding to the queue.
+
+The queue will be processed on these "timeouts" and on all events that indicate the "end" of some transactional
+processing (e.g. network completion, failure, etc.).
+
+=== Proposed Options
+
+The option keys below will likely be namespaced in the real API.
+
+[Horizontal]
+`:optimistic?` (boolean):: Specifies how aggressively the local effects of the mutations in `tx` can be processed.
+** `true` - All local effects happen before network requests. Default for `transact!`. In Fulcro 3, however, the
+results of the remote mutation will always be available in the same way as pessimistic mutations (ok-action and error-action).
+** `false` - The local effects of the first mutation happen, then the network effects, then any pessimistic
+local handler for that mutation. Then the optimistic effects of any mutations that remain, etc. Default for `ptransact!`.
+
+`:parallel?` (boolean):: When true indicates that the mutations within the `tx` can operate on the network with as much
+parallelism as can be provided by the network plumbing. Has the effect of forcing `:optimistic?` true, since the `tx` is essentially split
+into the smallest units possible.
+
+`:immediate?` (boolean):: The given tx is placed at the front of the queue.  Other submissions with this flag will be
+added after other previously-queued nodes with the immediate flag.
+
+`:group` (any):: A group ID for the transaction.  Any calls to `transact!` that have a group ID will cause the elements of
+the transaction to be added, if possible, to any group that is already in queue. If this is the first such node it becomes
+the new group. The group leader determines ALL OTHER OPTIONS (i.e. a node added to a group inherits all other options of
+the transactions in that group).
+
+`:after`:: Indicate that NO PART of the given `tx` should be started until after some other event:
+** `:queued-traffic` - The `tx` will be placed into the processing queue such that any mutations that require ANY network
+traffic will complete before it is allowed to proceed.  (txes that follow in *submission* will not precede it).
+** `[:queued-traffic <remote>]` - Same, but only wait for operations on the given remote.
+** `[:idle <ms>]` - The `tx` will not proceed until all other transactions have been processed, and the submission
+queue has been empty for at least `<ms>` milliseconds. New submissions that happen
+while this one is still queued *will* precede it. More than one submitted tx with this option will be processed in the
+order they were submitted after the idle condition is satisfied, and can themselves add things to the queue that will further
+defer any that remain.
+** `[:optimistic <txid>]` - after the optimistic behavior of `txid` has completed.
+** `[:remote <txid>]` - after the tx with the given ID has finished all network operations.
+** `[:optimisitic <symbol>]` - after the local updates of the next run of mutation with the given symbol.
+** `[:remote <symbol>]` - after the remote operations of the next run of mutation with the given symbol.
+** `[:or <other conditions ...>]` - After *any* of the listed conditions (e.g. `[:or [:remote 'f] [:idle 100]]`)
+** `[:and <other conditions ...>]` - After *all* of the listed conditions occur (satisfied in any order) (e.g. `[:and [:remote 'f] [:idle 100]]`)
+** `[:in-order <other conditions ...>]` - After *all* of the listed conditions occur (satisfied in the given order) (e.g. `[:in-order [:remote 'f] [:idle 100]]`)
+
+NOTE: `:or`, `:and`, and `:in-order` cannot be nested within each other.
+
+==== Complex Example
+
+Composition of transactions has some additional complexity.  An example is a router that is using a state machine
+and allows deferred loading of a route target (where the result of some transaction by the target can signal to
+"continue routing").  The example is as follows:
+
+. Top-level tx asks to route to `/user/1`
+. Router tells user target it wants to route to `1`, but that data isn't loaded, so the user target response with
+"deferred".  At some future point the target will indicate it is ready to proceed.
+. The router wants to set a timeout "just in case" the data never arrives (to show a routing error)
+. The user target *might* discover (during the load transaction) that it *did* already have the data, meaning it will
+want to do the transaction that tells the router "I'm ready!" immediately.  It might also discover it is actually missing
+and want to run a transaction to load it.
+. AFTER the router has notified the user target that it wants to route there, the router has some extra "work" to do
+via transact, meaning that if the route *target* has the data immediately, it might run the transaction telling the
+router is is ready before the router has saved the fact that it is even looking for such a message:
+
+```
+OUTER transaction is ROUTE:
+
+    router, --- fn call: route? ---> user
+                                      |
+                                      +---> submit TX1: ensure data loaded --> Submit TX3: trigger state machine event
+                                      |
+    router, <-- not yet --- user <----+
+      |
+      +--> submit TX2: (update state machine)
+
+    router (running due to trigger of TX3 state machine event)
+      |
+      +--> continue processing route instructions
+```
+
+In this case the Fulcro 2 source has to submit TX1, TX2, *and* TX3 with `setTimeout` (because they are nested in an outer
+context of a ROUTE.
+
+The desired transaction order is ROUTE, TX1, TX2, TX3. We don't want the message from TX3 to arrive *before* the
+transaction that finishes the outer ROUTE transaction finishes, since that could mean the state machine hasn't resolved
+to a stable state yet; however, we're leaving the order up to the implementation of the js timeout event queue and
+our ability to reason about the potentially complex nesting that could be in play. However, TX3 might be sumitted
+immediately if the processing of TX1 finds the data already in memory, possibly resulting in transaction
+order TX1, TX3, TX2, which leads to the state machine receiving an event it is not yet ready for (and thus ignoring
+because it isn't in the "right state").
+
+This is a problem of considerable difficulty when it comes to composition in general.
+
+The new structure with a priority queue solves this problem "by default".  It does so because the execution order on
+a single thread will always submit TX1 and TX2 in that order before anything can be processed. When the thread is released
+the queue is processed in order. TX1 runs, and even if it finds data and submits TX3 that new tx will still be behind
+TX2.
+
+==== Submission "Blocks"
+
+While the above example works in "default mode", it can still be confused
+
+Here the idea is that for composition you know you might do something like this:
+
+```
+(transact! ...)
+(let [n (f x)]
+  (transact! [(a n]))
+```
+
+where you suspect that `f` might also call `transact!`, but that you need your group of txes to run *as a group*. The
+introduction of a data dependency means that you must call `f` in the middle so you can't simply place them all
+in a single call.  Now, we *are asserting* that a nested transaction should *not actually exhibit nested order*, but
+instead that we'd like to treat the outer transactions with an elevated priority.
+
+The `:after` property in this case can be leveraged, but not to great effect because the caller does not know the parent,
+so the knowledge needed for `:after` is inverted and the callee must therefore be overly pessimistic about when it is
+safe to run.  Conversely the parent really doesn't know what `f` might actually do either, so there is no information
+to leverage to ensure that all transactions end up "in front" without likewise "over estimating".
+
+A possible solution is to use groups:
+
+```
+(transact! this tx1 {:group :a})
+(transact! this tx2 {:group :b})
+(transact! this tx3 {:group :c})
+(transact! this tx4 {:group :a})
+(transact! this tx5 {:group :a})
+(transact! this tx6 {:group :c})
+```
+
+then we can go with a relatively simple rule: on any given sequence of submissions group transactions together
+in the order the groups *first* appear.
+
+This results in a queue order as if the transacts has been called in this order:
+
+```
+(transact! this tx1 {:group :a})
+(transact! this tx4 {:group :a})
+(transact! this tx5 {:group :a})
+(transact! this tx2 {:group :b})
+(transact! this tx3 {:group :c})
+(transact! this tx6 {:group :c})
+```
+
+If the group leader of `:a` in the above example uses `:immediate? true` then it can ensure that all of its operations
+will precede anything else that is done system wide during that thread of control, since all other transactions in
+that group will inherit the position and settings of the first (so that group `:b` in immediate mode would still end up
+behind `:a`).
+
+=== Trade Offs
+
+Transactional composition at the UI layer has no access to return values of transactions (as they have yet to run). In
+our complex router case we asserted that some bit of data was returned from an intermediate step, and we use that *within*
+that first group of transactions *before* the nested step has any chance to run mutations.  This means that it is possible
+that the returned data might never "materialize properly" and that the mutation we ran earlier based upon it can make
+some faulty decisions.  In the case of the router this is not actually a real problem because the data returned is simply
+"where to go on success", so a failure would simply cancel the route and the use of that data. In other words the bit
+of "global data" has no implied ordering. It is simply a fact with no required time: "here is where you would go if I
+succeed in fetching the data".
+
+The clear statement of trade-off is: Transactions can have local ordering dependencies _at the expense of_ functional data
+dependencies, or they may have functional data dependencies if all actors _globally agree_ to use functional composition ordering.
+
