@@ -1,0 +1,216 @@
+== RFC - For Fulcro 3 Data Roots
+
+=== Background – Fulcro 2 Data Root
+
+Fulcro 2 inherits the concept of its data root from Om Next: There is a single "root" data and UI
+node that mirror each other in structure. The data tree in the graph database defines the overall
+potential shapes of the UI tree based upon the queries of the components and how they are joined.
+
+This has several distinct advantages:
+
+* Tools and libraries can use the query as a static and runtime "analysis tool" for overall application
+structure. Libraries like dynamic routing use this to auto-register a routing tree for use with
+HTML5 routes (this is a global use). The forms state library uses query traversal to figure out sub-forms
+(this is a more localized use).
+* Static data initialization of a normalized database can use a co-declared tree of data/query/ident
+to easily generate application initial state.
+* The global nature of the explicit edges in the graph database allow the developer to
+"walk the UI graph" in pure data.
+
+but it also has a number of disadvantages:
+
+* The entire database acts as the root node of the UI and cannot have an ident. This inconsistency leads
+to confusion of new users.
+* Users must "invent edges" in the data/query tree to join unrelated elements of the application
+together. All queries *except* that of the root node are relative to a parent that must compose
+in the props of the child.
+* The entire UI is coupled through props, which leads to unnecessary boilerplate (a query join,
+join of initial state, destructuring of props, and explicit passing of that prop)
+when composing unrelated sections of the application together.
+* There is no easy way (other than to force the user to build a query parser) to allow customization
+of the query engine for different parts of the application.
+* Code splitting requires that newly-loaded subtrees be "composed in" to the query of some parent
+in the existing application, which requires the use of dynamic queries (the query of the component
+that will show the newly loaded element must be changed to include the query of the loaded
+component, but the newly loaded component was not present when the initial query was created).
+
+The relative weight of these competing advantages and disadvantages is hard to judge. New users
+certainly dislike the root inconsistency and additional application-wide boilerplate. To my knowledge
+very few libraries and tools take significant advantage of root-based query traversal as a global
+analysis tool (though *many* use it to walk subtrees).
+
+=== Possible Improvements
+
+The simplest of these to fix is the notion that root cannot have an ident.  That is a simple localized
+fix that can be done in the reconciler. If root has an ident, then the root query can be resolved against
+a table, otherwise it shares the database root.
+
+The remaining disadvantages could be addressed by simply allowing any component with an ident
+to *serve* as a Fulcro data root. A data root would be very similar to simply starting
+a new reconciler and mounting it to some other DOM node in the same page, but using the
+same map-in-an-atom database.  In other words, the "initial state", "query root", and all
+other Fulcro-related data management would have the ability to (re)start at the special
+sub-root nodes.
+
+=== Is it a "Good Idea"?
+
+The big question is: would the _existence_ of this ability in any way compromise important functionality
+of Fulcro, composition of applications, or the utility of libraries.
+
+Certainly related components would continue to compose their queries. A free-standing "TodoItem" root
+node is a silly notion; however, a TodoList might function perfectly fine as its own root.  The same
+can be said for forms.  The query traversal for nested form relations is quite useful, but the top-level
+form container need not be coupled to it's parent any further than the parent's ability to send in
+some callbacks.  The uses of query composition (loading things that are related and normalizing them,
+finding tightly related data in groups of components) would all still be possible.
+
+The real technical loss is the ability to run `(get-query Root)` or `(get-query Root state)`
+on a single application node and get the complete (static or dynamic) view of what components
+"intend" to be part of the UI.
+
+I know of the following use cases that rely on `get-query` in this way.
+
+==== Use Case Problem - Global Routing
+
+The incubator dynamic router uses the fact that it can trust the global *dynamic* query to
+include "everything of interest to routing" in order to accomplish automatic composition of
+routers.  A routing request can be sent to the root router, and it can walk the requesting
+"route path" to find the routers that need to be sent instructions.
+
+This feature is a very nice form of boilerplate-free composition:
+
+```
+    Router1
+    |    |
+    a    b
+    |
+  Router2
+  |    |
+  c    d
+```
+
+An application that allows a route like "/a/c" can use the queries to traverse through component `a`
+to find the next router that can be asked to switch routes to `c`.
+
+Such an application is "tolerant to refactoring", in that a move such as this:
+
+```
+    Router1
+    |    |
+    a    b
+         |
+       Router2
+       |    |
+       c    d
+```
+
+does *not* require any change to the top-level router (or any other router in the system).
+Of course, the external route that was known as "/a/c" is now "/b/c", but from a code
+perspective this kind of compositional ease is quite appealing.
+
+But, we can also see the "invented graph edge" from `b -> Router` as the essential
+ingredient.  It is the novelty the routing system cares about, and that library
+is using it because it already *had to be declared* as a relation.  This same kind
+of relation could just as simply be declared in an alternate (but equally co-located)
+way:
+
+```
+(defsc-route-target b [_ _]
+ {:subrouter Router2}
+ ...)
+```
+
+which accomplishes the same compositional need without requiring it to be in the query.
+
+One could additionally argue that this alternate form of composition decouples the
+concern of routing from the concern of data query, and is really a better design.
+
+==== Use Case Problem - Tooling and Analysis
+
+The next argument for keeping a "global query" _requirement_ is for tooling and analysis.
+First, let's state what the global query really brings and what it does not:
+
+* Static analysis of the "startup" query and _desired_ component tree of the application.
+* Global dynamic analysis of the query and _likely_ component tree for any given
+  state map of the application.
+
+Note that a globally-composed query is *not* a guaranteed analysis of what components will
+actually *mount* on the UI.  In the static case the query itself cannot even really be
+trusted (initial app state could in fact affect dynamic query resolution).  In the dynamic
+analysis case the query can be trusted, but decisions in the rendering logic ultimately
+determine what components mount on the actual DOM.
+
+I'm not aware of an application, tool, or library other than the Incubator Dynamic
+router that tries to leverage this global information "as a whole". As a developer, I've
+rarely if ever tried to refer to the entire query for any reason.
+
+The actual (mounted and rendered) UI tree is visible in the DOM, and the Fulcro indexer tracks
+mounted components by ident and query key (and likely soon will include tracking of component
+UI parent). This means that any "localized" interest
+can usually be resolved by looking at the localized source of the component, the data
+starting at the ident of that component, or by pulling the react instance from the index
+if needed.
+
+Perhaps a better question: does the global composition of queries ever give us data that
+we cannot obtain by some other means?  Is it _incidental complexity_, or _useful
+and novel_ information?
+
+=== Implementation
+
+The likely implementation would basically provide a way to declare a component that can
+act as a "data root".  Such a component's "props" would consist of computed things from the
+parent such as callbacks and "desired identity".
+
+```
+(defsc-root Root [_ {:keys [onAction]}] ; props from parent do NOT include query data
+ {:ident (fn [] [:component/id :root]) ; possibly required, but certainly allowed.
+  :query [:x] ; interpreted from the ident's node
+ }
+ (let [props (get-root-props this)]  ; from real query
+   ))
+
+(def ui-root (factory Root))
+...
+
+   ;; called from anyplace in UI.
+   (ui-root {:onAction ...})
+```
+
+the desired identity could define "which instance" such a root associates with:
+
+```
+(defsc-root TodoList [_ {:keys [id]}]
+ {:ident (fn [] [:list/id id]) ; DYNAMIC based on prop from parent
+  :query [:list/id :list/name {:list/items (get-query Item)}]}
+ (let [props (get-root-props this)]  ; from real query
+   ))
+
+(def ui-list (factory TodoList))
+...
+
+   ;; called from anyplace in UI, renders the "TodoList" with id 22.
+   ;; note that "this" components query need not mention TodoList
+   (ui-list {:id 22 })
+```
+
+==== Initial State
+
+The initial state story for a root that can "appear" on screen at some non-initial time
+and can even possibly change identity based on parent computed props deserves some attention.
+
+Initial state in Fulcro is generally concerned with application startup, and one could
+argue that it should remain so.  A component appearing on the screen at some
+future time should use application logic to ensure that the appropriate data
+is available and loaded; however, the presence of "sub roots" in the application at
+initial mount should be able to behave "as if" query composition was in effect.
+
+The most apparent solution is to simply allow `get-initial-state` to add metadata
+to the initial state data of a sub-root such that Fulcro's start-up mechanisms know
+which subroot the data is for, and can normalize it using that subroot's query.  This
+would not require any global API changes.
+
+
+
+
+
+
