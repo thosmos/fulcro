@@ -113,12 +113,16 @@ added after other previously-queued nodes with the immediate flag.
 `:group` (any):: A group ID for the transaction.  Any calls to `transact!` that have a group ID will cause the elements of
 the transaction to be added, if possible, to any group that is already in queue. If this is the first such node it becomes
 the new group. The group leader determines ALL OTHER OPTIONS (i.e. a node added to a group inherits all other options of
-the transactions in that group).
+the transactions in that group). A group of transactions, when possible, will be merged into a single network request (It
+is not possible to merge requests that share mutation names, since the response from a request is a map that is keyed
+by mutation symbol and there is therefore no way to hold two different return values for the same-named mutation called
+twice within a transaction).
 
 `:after`:: Indicate that NO PART of the given `tx` should be started until after some other event:
 ** `:queued-traffic` - The `tx` will be placed into the processing queue such that any mutations that require ANY network
 traffic will complete before it is allowed to proceed.  (txes that follow in *submission* will not precede it).
 ** `[:queued-traffic <remote>]` - Same, but only wait for operations on the given remote.
+** `[:timeout <ms>]` - do not let this tx run until at least <ms> milliseconds have elapsed since it entered the queue.
 ** `[:idle <ms>]` - The `tx` will not proceed until all other transactions have been processed, and the submission
 queue has been empty for at least `<ms>` milliseconds. New submissions that happen
 while this one is still queued *will* precede it. More than one submitted tx with this option will be processed in the
@@ -251,3 +255,60 @@ succeed in fetching the data".
 The clear statement of trade-off is: Transactions can have local ordering dependencies _at the expense of_ functional data
 dependencies, or they may have functional data dependencies if all actors _globally agree_ to use functional composition ordering.
 
+== Reads (loads)
+
+Fulcro 2 "piggybacks" reads onto the mutation system. A load is nothing more than an internal transact of a load mutation.
+The reason for this is historical: Om Next used the parser to determine *what* to read from the network, but there was
+no easy way to make that work properly without first looking at and usually *writing* something to to the state (e.g.
+an in-progress marker so you didn't ask for the data while you were already loading it). So, a mutation was written
+in Untangled that did this write (a load queue) and then "morphed" the mutation node of the AST over to a noop. It then
+added in a check of the load queue during remote processing so that the load queue would be checked and processed. This
+is still how Fulcro 2 operates today.
+
+In many ways the *idea* that reads should be coupled to writes *is absolutely correct*.  The model for reasoning
+breaks if you cannot order your reads against your writes.
+
+Formally, mutations joins serve this purpose for individual mutations, and *are the only sane choice* if you need true
+distributed atomic semantics.  A single mutation with a return tree is the *easiest* thing to ensure is truly atomic
+(though it still needs you to do the right thing on the server). It is not terribly more difficult to cause an entire
+transaction of multiple mutation joins to also be atomic, though that usually involves some kind of global ACID processing
+that can cross parsing boundaries on the server.
+
+In non-atomic operation you usually want any *coupled* read/write combination
+of your distributed app to first send the writes, and then execute the reads. Consider a program that runs some
+arbitrary logic that submits the following through Fulcro in a single execution sequence:
+
+```
+(load :a Thing)
+(transact! [(f)])
+(load :b Other)
+```
+
+It is possible that the first submitted load might end up reading a value that the remote mutation `(f)` makes
+obsolete.  Typically we submit things in "data dependency" order, but when composing programs this is something
+you cannot easily ensure.
+
+So, historically Fulcro has ensured that if mutations and loads are queued together on a single sequence of execution that
+the *writes* are reordered to go _before_ the reads, giving you the best possible chance that your UI is as fresh as
+possible.
+
+It therefore makes sense to continue to keep read processing "joined up" to mutation processing in this sense.  That is
+to say the processing of reads will go through the same priority queue as mutations, but with the rewrite of these subsystems
+it will no longer be necessary to actually *submit* a load as a "fake mutation".  We can simply place it on the queue. This
+also means that loads will inherit the possibility of leveraging the same options that mutations have.
+
+=== Load Grouping
+
+This leads to an exciting possible improvement. If we leverage the options for grouping and timeout on transactions:
+
+```
+(load this :a Thing {:tx-options {:group :a :after [:timeout 50]}})
+(load this :b Other {:tx-options {:group :a :after [:timeout 50]}})
+(load this :c Stuff {:tx-options {:group :a :after [:timeout 50]}})
+```
+
+then "clusters" of compatible loads can be grouped into a single network request (assuming none of them use the same
+top-level key).
+
+Thus, an application that is starting up that has a myriad of data needs that are submitted in various parts of the app
+could use a common "startup" group to ensure that as many of those loads are grouped together as possible.
