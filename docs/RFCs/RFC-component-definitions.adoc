@@ -1,4 +1,4 @@
-== RFC - Fulcro 3 Components as Maps
+== RFC - Fulcro 3 Component Definitions
 
 === Background
 

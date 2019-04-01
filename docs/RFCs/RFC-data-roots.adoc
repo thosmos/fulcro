@@ -215,7 +215,7 @@ Some of the other compositions, such as component-local CSS, can also be similar
 Component-local CSS does use the query to traverse components looking for CSS, but at each sub-root
 "mount point" a manual composition could be made to ensure inclusion.
 
-Form field declarations are intended to be a libary concern that were placed into defsc as
+Form field declarations are intended to be a library concern that were placed into defsc as
 a convenience. In their case composition that parallels a query is fine.
 
 
