@@ -1,0 +1,212 @@
+== RFC - Fulcro 3 Components as Maps
+
+=== Background
+
+Fulcro 2 and earlier use a macro that generates a class-based React component. Historically
+React version prior to 16.8 required the use of a class-based component in order to access
+things like component lifecycle. Historically `defui` and `defsc` used protocols in order to
+add static and non-static methods to these classes, which were then used to provide
+things like form field and co-located CSS extensions.
+
+The current problems that Fulcro suffers from this history are:
+
+* The classes themselves contain a bit of unshared boilerplate that bloats code
+size a bit. This could be improved with some refactoring and improved code sharing.
+* It is somewhat painful to "extend" defsc in meaningful ways without either extending
+the framework macro itself, having good macro writing skills, or using the quite verbose
+protocol-based syntax of `defui`.
+
+The advent of hooks in React 16 brings an interesting opportunity, since now plain functions can
+act as fully-functional components with side effects and state. Removing the need to
+"integrate" into a generate class hierarchy brings the promise of breaking free from
+this model into a more open and extensible one.
+
+Where possible, it would be nice to allow better extension support to the existing class-based
+model as well, for those in circumstances where they have an existing code base they
+wish to keep that way (for whatever reason).
+
+The `defsc` macro exists really as nothing more than an error-checked, shortened, `defui`.  The
+initial design of it was _not meant_ to replace `defui`, just simplify the common cases.  The
+fact that it has become the defacto standard speaks to the fact that most common applications
+have little need for the protocol-based extensions that `defui` supports (beyond the one
+fulcro already provides); however, library authors often find a desire to include things in the
+`defsc` options map that have "special meaning".
+
+There are some interesting challenges here, though. `defsc`'s design goals were "minimal boilerplate,
+better error messages".  To that end, all of the options within the option map are "magic", and are
+interpreted by the macro.  For example, all of the lambdas share the `this` and `props` symbol/destructuring
+from the master declaration.  This allowed for a dramatic reduction in repetitive
+code, and an improvement to the ability to indicate when the destructuring itself "looks wrong"
+with respect to the query that feeds it.
+
+Unfortunately, this presents a challenge for extensibility. New options in the options are
+would be expected (by users) to behave in a similar manner.  Furthermore, many of the
+options generate an actual "protocol" extension to the generated class.
+
+=== Useful Observations
+
+I've played with option surrounding the possibility of making an "extensible macro", but the fact
+that macros are expanded in Clojure and various aspects of the dynamic language environment
+make that process no better than just asking people to write new macros.
+
+However, here are some observations that might lead to a usable system that supports
+extension:
+
+* There is no real inherent need to use protocols at all.  Simple properties set onto the class/function
+can themselves be functions or any kind of data.
+* Hooks eliminate the need for hooking up lifecycle methods a proper class methods.
+* Clojure functions (for SSR) could use metadata on functions to carry similar versions of extensions.
+* All of the existing extensions provide non-protocol wrapper functions, to deal
+with the fact that Clojure cannot have "static protocols" (which most of the core
+features need/use). This means eliminating the protocols would not really affect much code.
+* Backward compatibility is also provided by the fact that functions like `get-query` can
+just be expanded to look for the right thing under the hood.
+
+=== Desired Features
+
+* The ability to declare what we currently declare for a component:
+** Query, ident, initial state, form fields, etc.
+* The ability to do some level of "sanity checking" for the user. Compile-time checking is
+preferable if possible, but runtime checking is acceptable.
+* Minimum boilerplate
+* The ability for an arbitrary library author to seamlessly add support for their own data
+co-location needs.
+
+I believe all of these features can be supported by simply sticking with the options map notation,
+but dropping all of the protocol madness in favor of it just placing the options onto the
+component as an accessible map. In fact, the existing "magic" could be left in place
+with this scheme, and it could simply only bother checking the syntax and such of the
+"built-ins".
+
+Alternatively, a new declaration system could be added that drops most, if not all, of the magic.
+Is it possible to declare a component as purely a map and still support quite a bit of "magic"?
+
+```
+(def MyComponent
+  {:query (fn [] [:x :y {:z (get-query Z)}]) ; would *have* to be a lambda to prevent get-query elision
+   :initial-state {:x 1 :y 2 :z {}} ; could still treat the map as "params" to a call of get-initial-state
+   :ident :person/id ; could mean [:person/id (:person/id props)], other notations possible
+   :form-fields #{:x :y} ; fine
+   :will-enter (fn [reconciler route-params] ...) ; ok
+   ...
+   :render (fn [props computed] ...)})
+```
+
+The downside of the pure map interpretation is that *all* of the checking happens at a later
+step where the map is converted to an actual React component. Also, this new scheme does *not*
+work for React lifecycle, since those have to be methods on a class.
+
+A middle ground of `defsc` might be the following scheme:
+
+* Drop the use of protocols
+* Drop the auto-expansion of the argument list (e.g. component-local css destructuring), OR
+find a way to make it usefully extensible.
+* Any unknown entries in the options map just go onto the component as a fulcro options map
+that "wrapper functions" can find in order to "get or use their thing".
+* A flag like `:with-hooks?` could be used to force a component to be a hook-based one, or even
+the lack of a use of lifecycle methods would simply default to that?
+
+==== Extensible Arguments
+
+The `defsc` macro currently supports:
+
+```
+(defsc X [this props computed-props {:keys [x] :as css-names}]
+  (dom/div {:className x})
+  ...)
+```
+
+instead of
+
+```
+(dom/div :.some_long_namespace_name__X$x ...)
+```
+
+The latter entry is quite ad-hoc and was added because many existing users find
+it convenient.  It is really just a shortcut for:
+
+```
+(defsc X [this props computed-props]
+  (let [{:keys [x]} (css/get-classnames X)]
+    (dom/div {:className x}
+    ...))
+```
+
+so the amount of boilerplate it *actually* saves is minimal.  However, another "extension"
+that component-local CSS makes possible is the use of localized-dom:
+
+```
+(defsc X [this props computed]
+  (ldom/div :.x ...))
+```
+
+which is made possible by an internal wrapping of the component at render time that
+binds the "current component" name expansion onto a dynamic var so that the ldom
+rendering can find and use it, allowing for the shortened name.
+
+At the moment such an extension requires direct internal modification of the macro;
+however, I think such extensions are not out of the realm of possibility for
+the library author without the need to resort to macros.
+
+The "extension points" here are:
+
+* Support for putting "extra data" into the final arg of `defsc` at render time,
+based upon things in the options map. For the CSS case this is just munging
+names declared in the co-located options with the component ns/name.
+* Support for "dynamically scoping" useful information at render time (e.g. the
+namespace and name of the component we're rendering).
+
+It seems to me that a global (and dynamic for that matter) registry of such
+extensions could be registered with Fulcro allowing all components to suddenly gain
+this kind of dynamic ability.  This could be useful for things like factoring CSS support
+out to a library, reducing boilerplate in extensions, and even performance instrumentation.
+
+The internationalization support could use this for tracking which component
+an string is used in so that an on-screen translation editor could discover
+which things are "on screen" for a translation tool.
+
+React context providers and consumers could also probably be encapsulated this way.
+
+=== Proposed Fulcro 3 Implementation
+
+We create a new `defsc` macro (new ns) and maintain API parity where possible. Source
+changes for most applications are meant to be minimal, perhaps nothing more than
+changing a require statement.
+
+The existing features remain essentially the same except for the following:
+
+* `:ident` should support a simple keyword. This kw means the name of the table and ID prop of
+the entity. (e.g. is equivalent to `(fn [] [:k (:k props)])`)
+* `:css` becomes a decoupled library, leaving no direct dependency on garden anywhere in Fulcro. The
+library version leverages the new extension support to "regain" its syntactic equivalence.
+
+We drop the use of protocols (Object still needed if lifecycle methods are used). We
+support generating hooks-based components.
+
+We add an option when making a fulcro client that installs middleware into the component
+system with the following hooks:
+
+==== Wrap Render
+
+Adding in this middleware causes all component-level renders to go through whatever
+middleware is defined.  This composes like Ring:
+
+```
+:render-middleware (fn [original-render]
+                     (fn [this props computed extra-args]
+                       (original-render ...)))
+```
+
+for example:
+
+```
+:render-middleware (fn [original-render]
+                      (-> original-render
+                        (wrap-instrumentation)
+                        (wrap-component-local-css)
+                        ...))
+```
+
+This allows the augmentation of and of the arguments (freely doing so to extra args)
+and also gives the opportunity to bind dynamic vars to values during render. The options
+map of `defsc` can be pulled from the component, which is accessible via `this`.

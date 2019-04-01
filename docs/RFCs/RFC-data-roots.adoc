@@ -209,6 +209,15 @@ to the initial state data of a sub-root such that Fulcro's start-up mechanisms k
 which subroot the data is for, and can normalize it using that subroot's query.  This
 would not require any global API changes.
 
+==== Other compositions
+
+Some of the other compositions, such as component-local CSS, can also be similarly composed.
+Component-local CSS does use the query to traverse components looking for CSS, but at each sub-root
+"mount point" a manual composition could be made to ensure inclusion.
+
+Form field declarations are intended to be a libary concern that were placed into defsc as
+a convenience. In their case composition that parallels a query is fine.
+
 
 
 
