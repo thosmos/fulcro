@@ -92,17 +92,20 @@
                      {:c [:d]}])
 
   (let [state-map {:person {1 {:name   "tony"
+                               :x      44
                                :spouse [:person 2]}
                             2 {:name     "sam"
+                               :x        44
                                :spouse   [:person 1]
                                :children [[:person 3] [:person 4]]}
-                            3 {:name "judy"}
-                            4 {:name "sally"}}}
+                            3 {:name "judy" :x 99}
+                            4 {:name "sally" :x 99}}}
         ndb->tree fulcro.client.primitives/db->tree]
     (time
       (doseq [n (range 1 1000)]
         (db->tree
-          '[:a {:friends [:name {:spouse ...}]}
-            {:enemies [:name {:children ...}]}]
-          {:a 1 :friends [:person 1] :enemies [:person 2]}
+          '[:a :b :c :d :e {:friends [:name :x {:spouse ...}]}
+            {:enemies [:name :x {:children ...}]}]
+          {:a       1 :b 2 :c 3 :d 4 :e 5
+           :friends [:person 1] :enemies [:person 2]}
           state-map)))))
