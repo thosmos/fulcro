@@ -99,8 +99,10 @@
                             3 {:name "judy"}
                             4 {:name "sally"}}}
         ndb->tree fulcro.client.primitives/db->tree]
-    (db->tree
-      '[:a {:friends [:name {:spouse ...}]}
-        {:enemies [:name {:children ...}]}]
-      {:a 1 :friends [:person 1] :enemies [:person 2]}
-      state-map)))
+    (time
+      (doseq [n (range 1 1000)]
+        (db->tree
+          '[:a {:friends [:name {:spouse ...}]}
+            {:enemies [:name {:children ...}]}]
+          {:a 1 :friends [:person 1] :enemies [:person 2]}
+          state-map)))))
