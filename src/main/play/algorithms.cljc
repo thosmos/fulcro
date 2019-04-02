@@ -49,7 +49,7 @@
       to-many? (assoc! n key
                  (into []
                    (keep (fn [lookup-ref]
-                           (when-let [e (spy (get-in state-map (spy lookup-ref)))]
+                           (when-let [e (get-in state-map lookup-ref)]
                              (denormalize join-node e state-map idents-seen))))
                    join-entity))
       (and recursive? join-entity) (assoc! n key (denormalize parent-node join-entity state-map idents-seen))
@@ -97,10 +97,10 @@
                                :spouse   [:person 1]
                                :children [[:person 3] [:person 4]]}
                             3 {:name "judy"}
-                            4 {:name "sally"}}}]
-    (time
-      (doseq [n (range 1 1000)]
-        (db->tree
-          '[:a {:friends [:name {:spouse ...}]}]
-          {:a 1 :friends [:person 1]}
-          state-map)))))
+                            4 {:name "sally"}}}
+        ndb->tree fulcro.client.primitives/db->tree]
+    (db->tree
+      '[:a {:friends [:name {:spouse ...}]}
+        {:enemies [:name {:children ...}]}]
+      {:a 1 :friends [:person 1] :enemies [:person 2]}
+      state-map)))
