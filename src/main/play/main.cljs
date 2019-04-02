@@ -3,7 +3,9 @@
     [fulcro.client.primitives :as prim]
     ["react" :as react :refer [useState useEffect]]
     ["react-dom" :as react-dom]
-    [fulcro.client.dom :as dom]))
+    [fulcro.client.dom :as dom]
+    [fulcro.util :as util]
+    [fulcro.logging :as log]))
 
 (defonce app-db (atom {:counter/id {1 {:counter/id 1 :counter/n 1}
                                     2 {:counter/id 2 :counter/n 10}}}))
@@ -175,3 +177,6 @@
 
     (defn ui-todo-list [props]
       (dom/create-element TodoList #js {:fp props}))
+
+
+
