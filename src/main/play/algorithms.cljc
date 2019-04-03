@@ -2,22 +2,14 @@
   (:require
     [clojure.pprint]))
 
-(defn lookup-ref? [v]
-  (and (vector? v) (= 2 (count v)) (not (lookup-ref? (first v)))))
-
 (defmacro spy [v]
   (let [expr (str v)]
     `(let [result# ~v]
        (println (str ~expr "\n => " (with-out-str (clojure.pprint/pprint result#))))
        result#)))
 
-(defn iget
-  "Like `get`, but follows idents"
-  [entity k state-map]
-  (let [v (get entity k)]
-    (if (lookup-ref? v)
-      (get-in state-map v)
-      v)))
+(defn lookup-ref? [v]
+  (and (vector? v) (= 2 (count v)) (not (lookup-ref? (first v)))))
 
 (declare denormalize)
 
@@ -70,20 +62,46 @@
                    join-entity))
       (and recursive? join-entity) (if depth-based?
                                      (let [join-node-index (reduce
-                                                             (fn [idx n] (if (= (spy join-node) (spy n))
+                                                             (fn [idx n] (if (= join-node n)
                                                                            (reduced idx)
                                                                            (inc idx)))
                                                              0
                                                              (:children parent-node))
-                                           parent-node     (update-in (spy parent-node) [:children (spy join-node-index) :query] (fnil dec 1))]
+                                           parent-node     (update-in parent-node [:children join-node-index :query] (fnil dec 1))]
                                        (assoc! n key (denormalize parent-node join-entity state-map idents-seen)))
                                      (assoc! n key (denormalize parent-node join-entity state-map idents-seen)))
       (map? join-entity) (assoc! n key (denormalize target-node join-entity state-map idents-seen))
       :otherwise n)))
 
+(defn add-union! [n {:keys [query key] :as join-node} entity state-map parent-node idents-seen]
+  (let [v                (get entity key)
+        union-node       (-> join-node :children first)
+        union-key->query (reduce
+                           (fn [result {:keys [union-key] :as node}]
+                             (assoc result union-key node))
+                           {}
+                           (:children union-node))
+        to-many?         (and (vector? v) (lookup-ref? (first v)))]
+    (cond
+      to-many? (assoc! n key
+                 (into []
+                   (keep (fn [[table id :as lookup-ref]]
+                           (when-let [e (get-in state-map lookup-ref)]
+                             (when-let [target-ast-node (union-key->query table)]
+                               (denormalize target-ast-node e state-map idents-seen)))))
+                   v))
+      (lookup-ref? v) (when-let [e (get-in state-map v)]
+                        (when-let [target-ast-node (get union-key->query (first v))]
+                          (denormalize target-ast-node e state-map idents-seen)))
+      :otherwise n)))
+
 (defn add-joins! [transient-node entity state-map parent-node ast-join-nodes idents-seen]
   (reduce
-    (fn [n join-node] (add-join! n join-node entity state-map parent-node idents-seen))
+    (fn [n join-node]
+      (let [union? (map? (:query join-node))]
+        (if union?
+          (add-union! n join-node entity state-map parent-node idents-seen)
+          (add-join! n join-node entity state-map parent-node idents-seen))))
     transient-node
     ast-join-nodes))
 
@@ -106,9 +124,17 @@
     (binding [*denormalize-time* 22]
       (denormalize ast data refs {}))))
 
+(defmacro bench [& body]
+  `(time
+     (doseq [n# (range 1 1000)]
+       ~@body)))
+
 (comment
   (prim/query->ast
     '[:a {:friends [:name {:children 4}]}])
+
+  (prim/query->ast '[{:friends {:employee [:name :role]
+                                :person   [:name]}}])
 
   (prim/query->ast '[:a
                      (:b {:x 1})
@@ -116,19 +142,29 @@
                      {:union-join {:union-a [:a {:rj 2}] :union-b [:b {:irj ...}]}}
                      {:c [:d]}])
 
-  (let [state-map {:person {1 {:name   "tony"
-                               :x      44
-                               :spouse [:person 2]}
-                            2 {:name     "sam"
-                               :x        44
-                               :spouse   [:person 1]
-                               :children [[:person 3] [:person 4]]}
-                            3 {:name "judy" :x 99}
-                            4 {:name "sally" :x 99}}}
+  (time
+    (doseq [n (range 1 1000)]
+      (db->tree
+        '[:a :b :c :d :e {:friends [{:spouse ...} :name :x]}
+          {:enemies [:name :x {:children ...}]}]
+        {:a       1 :b 2 :c 3 :d 4 :e 5
+         :friends [:person 1] :enemies [:person 2]}
+        state-map)))
+
+  (let [state-map {:employee {1 {:name "polly" :role "programmer"}}
+                   :person   {1 {:name   "tony"
+                                 :x      44
+                                 :spouse [:person 2]}
+                              2 {:name     "sam"
+                                 :x        44
+                                 :spouse   [:person 1]
+                                 :children [[:person 3] [:person 4]]}
+                              3 {:name "judy" :x 99}
+                              4 {:name "sally" :x 99}}}
         ndb->tree fulcro.client.primitives/db->tree]
-    (db->tree
-      '[:a :b :c :d :e {:friends [{:spouse ...} :name :x]}
-        {:enemies [:name :x {:children ...}]}]
-      {:a       1 :b 2 :c 3 :d 4 :e 5
-       :friends [:person 1] :enemies [:person 2]}
-      state-map)))
+    (bench
+      (db->tree
+        '[{:friends {:employee [:name :role]
+                     :person   [:name {:children ...}]}}]
+        {:friends [[:person 2] [:employee 1]]}
+        state-map))))
