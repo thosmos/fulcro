@@ -1,9 +1,6 @@
 (ns play.algorithms
   #?(:cljs (:require-macros play.algorithms))
   (:require
-    [taoensso.tufte :refer [profile p]]
-    [fulcro.client.impl.parser :refer [path-meta]]
-    [fulcro.client.primitives :as prim]
     [clojure.pprint]))
 
 (defmacro spy [v]
@@ -32,52 +29,54 @@
 (defn reduce-depth
   "Reduce the query depth on `join-node` that appears within the children of `parent-node`."
   [parent-node join-node]
-  (p ::reduce-depth
-    (let [join-node-index (reduce
-                            (fn [idx n] (if (identical? join-node n)
-                                          (reduced idx)
-                                          (inc idx)))
-                            0
-                            (:children parent-node))]
-      (update-in parent-node [:children join-node-index :query] (fnil dec 1)))))
+  (let [join-node-index (reduce
+                          (fn [idx n] (if (identical? join-node n)
+                                        (reduced idx)
+                                        (inc idx)))
+                          0
+                          (:children parent-node))]
+    (update-in parent-node [:children join-node-index :query] (fnil dec 1))))
 
 (defn add-join! [n {:keys [query key] :as join-node} entity state-map parent-node idents-seen]
-  (p ::add-join!
-    (let [v               (get entity key)
-          is-ref?         (lookup-ref? v)
-          join-entity     (if is-ref? (get-in state-map v) v)
-          to-many?        (and (vector? join-entity) (lookup-ref? (first join-entity)))
-          depth-based?    (int? query)
-          recursive?      (or (= '... query) depth-based?)
-          stop-recursion? (and recursive? (or (= 0 query)
-                                            (and is-ref? (contains? (get idents-seen key) v))))
-          parent-node     (if (and depth-based? (not stop-recursion?))
-                            (reduce-depth parent-node join-node)
-                            parent-node)
-          target-node     (if recursive? parent-node join-node)
-          idents-seen     (if is-ref?
-                            (update idents-seen key (fnil conj #{}) v)
-                            idents-seen)]
-      (cond
-        stop-recursion? (assoc! n key v)
-        to-many? (assoc! n key
-                   (into []
-                     (keep (fn [lookup-ref]
-                             (when-let [e (get-in state-map lookup-ref)]
-                               (denormalize target-node e state-map idents-seen))))
-                     join-entity))
-        (and recursive? join-entity) (if depth-based?
-                                       (let [join-node-index (reduce
-                                                               (fn [idx n] (if (identical? join-node n)
-                                                                             (reduced idx)
-                                                                             (inc idx)))
-                                                               0
-                                                               (:children parent-node))
-                                             parent-node     (update-in parent-node [:children join-node-index :query] (fnil dec 1))]
-                                         (assoc! n key (denormalize parent-node join-entity state-map idents-seen)))
+  (let [v               (spy (get entity key))
+        is-ref?         (lookup-ref? v)
+        join-entity     (if is-ref? (get-in state-map v) v)
+        to-many?        (and (vector? join-entity) (lookup-ref? (first join-entity)))
+        depth-based?    (int? query)
+        recursive?      (or (= '... query) depth-based?)
+        stop-recursion? (and recursive? (or (= 0 query)
+                                          (and is-ref?
+                                            ;; NOTE: allows depth-based to ignore loops
+                                            (not depth-based?)
+                                            (contains? (get idents-seen key) v))))
+        parent-node     (if (and depth-based? (not stop-recursion?))
+                          (reduce-depth parent-node join-node)
+                          parent-node)
+        target-node     (if recursive? parent-node join-node)
+        ;; NOTE: fixed bug with old db->tree, so behavior is different
+        idents-seen     (spy (if is-ref?
+                               (update idents-seen key (fnil conj #{}) v)
+                               idents-seen))]
+    (cond
+      stop-recursion? (assoc! n key v)
+      to-many? (assoc! n key
+                 (into []
+                   (keep (fn [lookup-ref]
+                           (when-let [e (get-in state-map lookup-ref)]
+                             (denormalize target-node e state-map idents-seen))))
+                   join-entity))
+      (and recursive? join-entity) (if depth-based?
+                                     (let [join-node-index (reduce
+                                                             (fn [idx n] (if (identical? join-node n)
+                                                                           (reduced idx)
+                                                                           (inc idx)))
+                                                             0
+                                                             (:children parent-node))
+                                           parent-node     (update-in parent-node [:children join-node-index :query] (fnil dec 1))]
                                        (assoc! n key (denormalize parent-node join-entity state-map idents-seen)))
-        (map? join-entity) (assoc! n key (denormalize target-node join-entity state-map idents-seen))
-        :otherwise n))))
+                                     (assoc! n key (denormalize parent-node join-entity state-map idents-seen)))
+      (map? join-entity) (assoc! n key (denormalize target-node join-entity state-map idents-seen))
+      :otherwise n)))
 
 (defn add-union! [n {:keys [key] :as join-node} entity state-map idents-seen]
   (let [v                (get entity key)
@@ -118,6 +117,7 @@
   (assert (not= type :prop))
   (let [grouped-children (group-by :type children)
         nil-nodes        (get grouped-children nil false)
+        ;; NOTE: wildcard works better than the old db->tree (which ignores wildcard when joins are present)
         wildcard?        (and nil-nodes (= '* (some-> nil-nodes first :key)))
         result-node      (if wildcard?
                            (transient current-entity)
@@ -172,14 +172,10 @@
                               3 {:name "judy" :x 99}
                               4 {:name "sally" :x 99}}}
         ndb->tree fulcro.client.primitives/db->tree]
-    (play.algorithms/bench
-      (db->tree
-        '[*
-          {:friends [{:spouse ...} :name :x]}
-          {:enemies [:name :x {:children ...}
-                     {:things {:person [:name] :employee [:role]}}]}]
-        {:a       1 :b 2 :c 3 :d 4 :e 5
-         :friends [:person 1]
-         :enemies [:person 2]}
-        state-map))
+    (db->tree
+      '[{:friends [:name {:spouse ...}]}]
+      {:a       1 :b 2 :c 3 :d 4 :e 5
+       :friends [:person 1]
+       :enemies [:person 2]}
+      state-map)
     ))
