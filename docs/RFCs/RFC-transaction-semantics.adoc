@@ -103,25 +103,28 @@ results of the remote mutation will always be available in the same way as pessi
 ** `false` - The local effects of the first mutation happen, then the network effects, then any pessimistic
 local handler for that mutation. Then the optimistic effects of any mutations that remain, etc. Default for `ptransact!`.
 
-`:parallel?` (boolean):: When true indicates that the mutations within the `tx` can operate on the network with as much
-parallelism as can be provided by the network plumbing. Has the effect of forcing `:optimistic?` true, since the `tx` is essentially split
-into the smallest units possible.
+`:parallel?` (boolean):: When true indicates that the submission can operate on the network with as much
+parallelism as can be provided by the network plumbing. Has the effect of forcing `:optimistic?` true for
+mutations, since the `tx` is essentially split into the smallest units possible.
 
-`:immediate?` (boolean):: The given tx is placed at the front of the queue.  Other submissions with this flag will be
+`:immediate?` (boolean):: The given submission is placed at the front of the queue.  Other submissions with this flag will be
 added after other previously-queued nodes with the immediate flag.
 
-`:group` (any):: A group ID for the transaction.  Any calls to `transact!` that have a group ID will cause the elements of
-the transaction to be added, if possible, to any group that is already in queue. If this is the first such node it becomes
+`:group` (any):: A group ID for the submission.  Any other submissions that have a group ID will cause the elements of
+that submission to be added, if possible, to any group submission that is already in queue. If this is the first such node it becomes
 the new group. The group leader determines ALL OTHER OPTIONS (i.e. a node added to a group inherits all other options of
-the transactions in that group). A group of transactions, when possible, will be merged into a single network request (It
+the transactions in that group). A group, when possible, will be merged into a single network request (It
 is not possible to merge requests that share mutation names, since the response from a request is a map that is keyed
 by mutation symbol and there is therefore no way to hold two different return values for the same-named mutation called
-twice within a transaction).
+twice within a transaction). NOTE: If we change the network protocol to allow for a collection of requests/responses
+then we could, in fact, merge them all onto one network request.
 
-`:after`:: Indicate that NO PART of the given `tx` should be started until after some other event:
-** `:queued-traffic` - The `tx` will be placed into the processing queue such that any mutations that require ANY network
+`:after`:: Indicate that NO PART of the submission should be started until after some other event:
+** `:remote-mutations` - The submission will be placed into the processing queue such that any mutations that require ANY network
 traffic will complete before it is allowed to proceed.  (txes that follow in *submission* will not precede it).
-** `[:queued-traffic <remote>]` - Same, but only wait for operations on the given remote.
+** `[:remote-mutations <remote>]` - Same, but only wait for mutations against the given remote.
+** `:loads` - The submission will be placed behind any queued loads.
+** `[:loads <remote>]` - Same, but only behind operations with the given remote.
 ** `[:timeout <ms>]` - do not let this tx run until at least <ms> milliseconds have elapsed since it entered the queue.
 ** `[:idle <ms>]` - The `tx` will not proceed until all other transactions have been processed, and the submission
 queue has been empty for at least `<ms>` milliseconds. New submissions that happen
@@ -297,14 +300,17 @@ to say the processing of reads will go through the same priority queue as mutati
 it will no longer be necessary to actually *submit* a load as a "fake mutation".  We can simply place it on the queue. This
 also means that loads will inherit the possibility of leveraging the same options that mutations have.
 
+NOTE: In order to maintain bw compatibility the default `:after` setting for loads
+will be `[:remote-mutations remote-of-load]`.
+
 === Load Grouping
 
 This leads to an exciting possible improvement. If we leverage the options for grouping and timeout on transactions:
 
 ```
-(load this :a Thing {:tx-options {:group :a :after [:timeout 50]}})
-(load this :b Other {:tx-options {:group :a :after [:timeout 50]}})
-(load this :c Stuff {:tx-options {:group :a :after [:timeout 50]}})
+(load this :a Thing {:queue-options {:group :a :after [:timeout 50]}})
+(load this :b Other {:queue-options {:group :a :after [:timeout 50]}})
+(load this :c Stuff {:queue-options {:group :a :after [:timeout 50]}})
 ```
 
 then "clusters" of compatible loads can be grouped into a single network request (assuming none of them use the same
