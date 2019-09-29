@@ -140,12 +140,12 @@
   if the remote itself throws exceptions."
   [app send-node remote-name]
   [:com.fulcrologic.fulcro.application/app ::send-node :com.fulcrologic.fulcro.application/remote-name => any?]
-  (enc/if-let [remote          (get (app->remotes app) remote-name)
-               transmit!       (get remote :transmit!)
+  (enc/if-let [remote (get (app->remotes app) remote-name)
+               transmit! (get remote :transmit!)
                query-transform (ah/app-algorithm app :global-eql-transform)
-               send-node       (if query-transform
-                                 (update send-node ::ast query-transform)
-                                 send-node)]
+               send-node (if query-transform
+                           (update send-node ::ast query-transform)
+                           send-node)]
     (try
       (inspect/ilet [tx (eql/ast->query (::ast send-node))]
         (inspect/send-started! app remote-name (::id send-node) tx))
@@ -626,6 +626,11 @@
     #{}
     queue))
 
+(defn notify-queue-listeners!
+  "Tell any registered queue listeners that the processing queue is empty."
+  [app]
+  )
+
 (>defn process-queue!
   "Run through the active queue and do a processing step."
   [{:com.fulcrologic.fulcro.application/keys [state-atom runtime-atom] :as app}]
@@ -641,10 +646,13 @@
         remotes          (app->remote-names app)
         schedule-render! (ah/app-algorithm app :schedule-render!)
         explicit-refresh (requested-refreshes app new-queue)
-        remotes-active?  (active-remotes new-queue remotes)]
+        remotes-active?  (active-remotes new-queue remotes)
+        queue-complete?  (every? (partial fully-complete? app) new-queue)]
     (swap! state-atom assoc :com.fulcrologic.fulcro.application/active-remotes remotes-active?)
-    (swap! runtime-atom assoc ::active-queue new-queue)
+    (swap! runtime-atom assoc ::active-queue (if queue-complete? [] new-queue))
     (when (seq explicit-refresh)
       (swap! runtime-atom update :com.fulcrologic.fulcro.application/to-refresh accumulate explicit-refresh))
+    (when queue-complete?
+      (notify-queue-listeners! app))
     (schedule-render! app)
     nil))
