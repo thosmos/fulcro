@@ -119,14 +119,16 @@
 (defn- update-state
   "Updates the state of the wrapped input element."
   [component next-props value]
-  (let [on-change  (gobj/getValueByKeys component "state" "onChange")
+  (let [on-change  (gobj/getValueByKeys component "state" "data" "onChange")
         next-state #js {}
         inputRef   (gobj/get next-props "inputRef")]
-    (gobj/extend next-state next-props #js {:onChange on-change})
-    (gobj/set next-state "value" value)
+    (gobj/set next-state "data" (js/Object.assign #js {}
+                                  next-props
+                                  #js {:onChange on-change
+                                       :value value}))
     (when inputRef
-      (gobj/remove next-state "inputRef")
-      (gobj/set next-state "ref" inputRef))
+      (gobj/remove (gobj/get next-state "data") "inputRef")
+      (gobj/set (gobj/get next-state "data") "ref" inputRef))
     (.setState component next-state)))
 
 (defonce form-elements? #{"input" "select" "option" "textarea"})
@@ -139,10 +141,11 @@
   (let [ctor (fn [props]
                (this-as this
                  (set! (.-state this)
-                   (let [state #js {:ref (gobj/get props "inputRef")}]
-                     (->> #js {:onChange (goog/bind (gobj/get this "onChange") this)}
-                       (gobj/extend state props))
-                     (gobj/remove state "inputRef")
+                   (let [state (clj->js {:data {:ref (gobj/get props "inputRef")}})]
+                     (gobj/set state "data" (js/Object.assign #js {}
+                                              props
+                                              #js {:onChange (goog/bind (gobj/get this "onChange") this)}))
+                     (gobj/remove (gobj/get state "data") "inputRef")
                      state))
                  (.apply js/React.Component this (js-arguments))))]
     (set! (.-displayName ctor) (str "wrapped-" element))
@@ -157,7 +160,7 @@
             (gobj/getValueByKeys event "target" "value"))))
 
       (UNSAFE_componentWillReceiveProps [this new-props]
-        (let [state-value   (gobj/getValueByKeys this "state" "value")
+        (let [state-value   (gobj/getValueByKeys this "state" "data" "value")
               this-node     (js/ReactDOM.findDOMNode this)
               value-node    (if (is-form-element? this-node)
                               this-node
@@ -173,14 +176,14 @@
             (update-state this new-props (gobj/get new-props "value")))))
 
       (render [this]
-        (js/React.createElement element (.-state this))))
+        (js/React.createElement element (gobj/getValueByKeys this "state" "data"))))
     (let [real-factory (js/React.createFactory ctor)]
       (fn [props & children]
         (if-let [r (gobj/get props "ref")]
           (if (string? r)
             (apply real-factory props children)
             (let [p #js{}]
-              (gobj/extend p props)
+              (js/Object.assign p props)
               (gobj/set p "inputRef" r)
               (gobj/remove p "ref")
               (apply real-factory p children)))
