@@ -21,6 +21,7 @@
     [com.fulcrologic.guardrails.core :refer [>def >defn >defn- =>]]
     [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
     [com.fulcrologic.fulcro.algorithms.normalized-state :as fns]
+    [com.fulcrologic.fulcro.algorithms.normalize :as fnorm]
     [com.fulcrologic.fulcro.mutations :refer [defmutation]]
     [com.fulcrologic.fulcro.components :as comp :refer [defsc]]))
 
@@ -29,9 +30,10 @@
 (>def ::id (s/with-gen eql/ident? ident-generator))         ; form config uses the entity's ident as an ID
 (>def ::fields (s/every keyword? :kind set?))               ; a set of kws that are fields to track
 (>def ::subforms (s/map-of keyword? any?))                  ; a map of subform field to component class
+(>def ::joins (s/map-of keyword? any?))                     ; a map of non-form join field to component class
 (>def ::pristine-state (s/map-of keyword? any?))            ; the saved state of the form
 (>def ::complete? (s/every keyword? :kind set?))            ; the fields that have been interacted with
-(>def ::config (s/keys :req [::id ::fields] :opt [::pristine-state ::complete? ::subforms]))
+(>def ::config (s/keys :req [::id ::fields] :opt [::pristine-state ::complete? ::subforms ::joins]))
 (>def ::validity #{:valid :invalid :unchecked})
 (>def ::denormalized-form (s/keys :req [::config]))
 
@@ -52,8 +54,8 @@
   "A component supporting normalization of form state configuration. Use Fulcro Inspect for viewing that data.
   Rendering isn't supported on this component so it will work with React Native.
   Can also render the form config, if that is useful to you."
-  [this {:keys [::id ::complete? ::fields ::subforms ::pristine-state]}]
-  {:query [::id ::fields ::complete? ::subforms ::pristine-state]
+  [this {:keys [::id ::complete? ::fields ::subforms ::pristine-state ::joins]}]
+  {:query [::id ::fields ::complete? ::subforms ::pristine-state ::joins]
    :ident (fn []
             [::forms-by-ident {:table (first id)
                                :row   (second id)}])})
@@ -78,9 +80,20 @@
     ::fields   fields
     ::subforms (into {}
                  (map (fn [[k v]] {k (with-meta {} {:component v})}))
-                 subforms)}))
+                 subforms)})
+  ([entity-ident fields subforms joins]
+   [eql/ident? ::fields ::fields ::fields => ::config]
+   {::id       entity-ident
+    ::fields   fields
+    ::subforms (into {}
+                 (map (fn [[k v]] {k (with-meta {} {:component v})}))
+                 subforms)
+    ::joins    (into {}
+                 (map (fn [[k v]] {k (with-meta {} {:component v})}))
+                 joins)}))
 
 (defn- derive-form-info [class]
+  (log/debug "DERIVING FORM INFO for class" class)
   (let [query-nodes         (some-> class
                               (comp/get-query)
                               (eql/query->ast)
@@ -96,17 +109,25 @@
         all-fields          (get-form-fields class)
         has-fields?         (seq all-fields)
         fields              (set/intersection all-fields prop-keys)
-        subform-keys        (set/intersection all-fields join-keys)
-        subforms            (into {}
+        form-join-keys      (set/intersection all-fields join-keys)
+        join-classmap       (into {}
                               (map (fn [k] [k (with-meta {} {:component (join-component k)})]))
-                              subform-keys)]
+                              form-join-keys)
+        ;; if joins don't have :form-fields, then treat them as nonform-join-keys
+        [nonform-join-keys subform-keys] (reduce
+                                           (fn [[j-ks sf-ks] fj-k]
+                                             (if (seq (get-form-fields (join-component fj-k)))
+                                               [j-ks (conj sf-ks fj-k)]
+                                               [(conj j-ks fj-k) sf-ks]))
+                                           [#{} #{}]
+                                           form-join-keys)]
     (when-not queries-for-config?
       (throw (ex-info (str "Attempt to add form configuration to " (comp/component-name class) ", but it does not query for config!")
                {:offending-component class})))
     (when-not has-fields?
       (throw (ex-info (str "Attempt to add form configuration to " (comp/component-name class) ", but it does not declare any fields!")
                {:offending-component class})))
-    [fields subforms subform-keys]))
+    [fields join-classmap subform-keys nonform-join-keys]))
 
 (>defn add-form-config
   "Add form configuration data to a *denormalized* entity (e.g. pre-merge). This is useful in
@@ -120,33 +141,19 @@
   Returns the (possibly updated) denormalized entity, ready to merge."
   [class entity]
   [comp/component-class? map? => (s/keys :req [::config])]
-  (let [[fields subform-classmap subform-keys] (derive-form-info class)
+  (let [[fields join-classmap subform-keys nonform-join-keys] (derive-form-info class)
         local-entity (if (contains? entity ::config)
                        entity
-                       (let [pristine-state (select-keys entity fields)
-                             subform-ident  (fn [k entity] (some-> (get subform-classmap k) meta
-                                                             :component (comp/get-ident entity)))
-                             subform-keys   (-> subform-classmap keys set)
-                             subform-refs   (reduce
-                                              (fn [refs k]
-                                                (let [items (get entity k)]
-                                                  (cond
-                                                    ; to-one
-                                                    (map? items) (assoc refs k (subform-ident k items))
-                                                    ; to-many
-                                                    (vector? items) (assoc refs k (mapv #(subform-ident k %) items))
-                                                    :else refs)))
-                                              {}
-                                              subform-keys)
-                             pristine-state (merge pristine-state subform-refs)
+                       (let [pristine-state (fnorm/tree->db class (select-keys entity (set/union fields subform-keys nonform-join-keys)))
                              config         {::id             (comp/get-ident class entity)
                                              ::fields         fields
                                              ::pristine-state pristine-state
-                                             ::subforms       (or subform-classmap {})}]
+                                             ::joins          (select-keys (or join-classmap {}) nonform-join-keys)
+                                             ::subforms       (select-keys (or join-classmap {}) subform-keys)}]
                          (merge entity {::config config})))]
     (reduce
       (fn [resulting-entity k]
-        (let [c     (some-> subform-classmap (get k) meta :component)
+        (let [c     (some-> join-classmap (get k) meta :component)
               child (get resulting-entity k)]
           (try
             (cond
@@ -172,22 +179,23 @@
   Returns an updated state map with normalized form configuration in place for the entity."
   [state-map class entity-ident]
   [map? comp/component-class? eql/ident? => map?]
-  (let [[fields subform-classmap subform-keys] (derive-form-info class)
+  (let [[fields join-classmap subform-keys nonform-join-keys] (derive-form-info class)
         entity            (get-in state-map entity-ident)
         updated-state-map (if (contains? entity ::config)
                             state-map
-                            (let [pristine-state (select-keys entity (set/union subform-keys fields))
+                            (let [pristine-state (select-keys entity (set/union fields subform-keys nonform-join-keys))
                                   config         {::id             entity-ident
                                                   ::fields         fields
                                                   ::pristine-state pristine-state
-                                                  ::subforms       (or subform-classmap {})}
+                                                  ::joins          (select-keys (or join-classmap {}) nonform-join-keys)
+                                                  ::subforms       (select-keys (or join-classmap {}) subform-keys)}
                                   cfg-ident      [::forms-by-ident (form-id entity-ident)]]
                               (-> state-map
                                 (assoc-in cfg-ident config)
                                 (assoc-in (conj entity-ident ::config) cfg-ident))))]
     (reduce
       (fn [smap subform-key]
-        (let [subform-class  (some-> subform-classmap (get subform-key) meta :component)
+        (let [subform-class  (some-> join-classmap (get subform-key) meta :component)
               subform-target (get entity subform-key)]
           (try
             (cond

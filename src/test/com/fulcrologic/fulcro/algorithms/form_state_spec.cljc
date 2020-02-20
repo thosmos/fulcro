@@ -32,14 +32,6 @@
 
 (s/def ::phone-number (s/and string? #(re-matches #"[-0-9()]+" %)))
 
-(defsc Person [this props]
-  {:query       [:db/id ::person-name ::person-age
-                 {::unused (comp/get-query UnusedForm)}
-                 {::phone-numbers (comp/get-query Phone)}
-                 fs/form-config-join]
-   :ident       [:person/id :db/id]
-   :form-fields #{::person-name ::unused ::person-age ::phone-numbers}})
-
 (defsc NonForm [this props]
   {:query [:id :x]
    :ident [:ntop :id]})
@@ -48,10 +40,19 @@
   {:query [:id :x fs/form-config-join]
    :ident [:ntop :id]})
 
-(defsc BadlyNestedForm [this props]
+(defsc NestedNonForm [this props]
   {:query       [:id :name {:thing (comp/get-query NonForm)} fs/form-config-join]
    :ident       [:top :id]
    :form-fields #{:name :thing}})
+
+(defsc Person [this props]
+  {:query       [:db/id ::person-name ::person-age
+                 {::unused (comp/get-query UnusedForm)}
+                 {::phone-numbers (comp/get-query Phone)}
+                 {::nonform (comp/get-query NonForm)}
+                 fs/form-config-join]
+   :ident       [:person/id :db/id]
+   :form-fields #{::person-name ::unused ::person-age ::phone-numbers ::nonform}})
 
 (s/def ::person-name (s/and string? #(not (empty? (str/trim %)))))
 
@@ -60,11 +61,12 @@
     (let [data-tree       {:db/id          1
                            ::person-name   "Joe"
                            ::phone-numbers [{:db/id   2 ::phone-number "555-1212"
-                                             ::locale {:db/id 5 ::country :US}}]}
+                                             ::locale {:db/id 5 ::country :US}}]
+                           ::nonform {:id 2 :x 2}}
           configured-form (fs/add-form-config Person data-tree)
           form-config     (get configured-form ::fs/config)]
       (assertions
-        "::f/config is a spec-valid config"
+        "::fs/config is a spec-valid config"
         (s/valid? ::fs/config form-config) => true
         (s/explain-data ::fs/config form-config) => nil
         "the original entity fields are unchanged"
@@ -93,9 +95,9 @@
         "throws an exception if the target fails to query for form config"
         (fs/add-form-config NonForm data-tree) =throws=> #"to .*NonForm, but it does not query for config"
         "throws an exception if the target fails to declare fields"
-        (fs/add-form-config FormNoFields data-tree) =throws=> #"to .*FormNoFields, but it does not declare any fields"
-        "does recursive checks on subforms"
-        (fs/add-form-config BadlyNestedForm data-tree) =throws=> #"Subform .*NonForm of .*BadlyNestedForm"))))
+        (fs/add-form-config FormNoFields data-tree) =throws=> #"to .*FormNoFields, but it does not declare any fields"))))
+        ;"does recursive checks on subforms"
+        ;(fs/add-form-config NestedNonForm data-tree) =throws=> #"Subform .*NonForm of .*BadlyNestedForm"))))
 
 (specification "add-form-config*"
   (let [state-map         {:person/id {1 {:db/id          1 ::person-name "Joe" :ui/checked? true
@@ -140,11 +142,11 @@
       locale                                  (fs/add-form-config Locale locale)
       phone-numbers                           [{:db/id 2 ::phone-number "555-1212" ::locale locale} {:db/id 3 ::phone-number "555-1212"}]
       phone-number-forms                      (mapv #(fs/add-form-config Phone %) phone-numbers)
-      person                                  {:db/id 1 ::person-name "Bo" ::phone-numbers phone-number-forms}
+      person                                  {:db/id 1 ::person-name "Bo" ::phone-numbers phone-number-forms ::nonform {:id 1 :x 2}}
       person-form                             (fs/add-form-config Person person)
       state-map                               (fnorm/tree->db [{:the-person (comp/get-query Person)}] {:the-person person-form} true)
       validated-person                        (-> person-form
-                                                (assoc-in [::fs/config ::fs/complete?] #{::person-name ::person-age})
+                                                (assoc-in [::fs/config ::fs/complete?] #{::person-name ::person-age ::nonform})
                                                 (assoc-in [::phone-numbers 0 ::fs/config ::fs/complete?] #{::phone-number})
                                                 (assoc-in [::phone-numbers 0 ::locale ::fs/config ::fs/complete?] #{::country})
                                                 (assoc-in [::phone-numbers 1 ::fs/config ::fs/complete?] #{::phone-number}))
